@@ -1,5 +1,6 @@
 import logging
 import random
+import datetime
 
 import disnake
 from disnake.ext import tasks, commands
@@ -49,12 +50,14 @@ class GiveawayCommand(commands.Cog):
     async def giveaway_loop(self):
         database = await get_database()
         cursor = database.giveaways.find(
-            {"end_date": {"$lte": pendulum.now()}, "ended": False}
+            {"end_date": {"$lte": datetime.datetime.utcnow()}, "ended": False}
         )
         giveaway_list = await cursor.to_list(length=None)
 
         for giveaway in giveaway_list:
-            if giveaway["end_date"] < pendulum.now():
+            end_date = pendulum.instance(giveaway["end_date"], tz="UTC")
+
+            if end_date < pendulum.now():
                 continue
 
             try:
@@ -147,7 +150,9 @@ class GiveawayCommand(commands.Cog):
                 ephemeral=True,
             )
 
-        if giveaway["end_date"] < pendulum.now():
+        end_date = pendulum.instance(giveaway["end_date"], tz="UTC")
+
+        if end_date < pendulum.now():
             return await inter.followup.send(
                 "This giveaway doesn't accept participants anymore!", ephemeral=True
             )
@@ -161,7 +166,7 @@ class GiveawayCommand(commands.Cog):
 
         buttons = get_giveaway_buttons(
             first_label=f"Participate ({len(giveaway['participants'])})",
-            second_label="Ends on " + format_time(giveaway["end_date"]),
+            second_label="Ends on " + format_time(end_date),
         )
 
         await database.giveaways.update_one(
@@ -181,22 +186,19 @@ class GiveawayCommand(commands.Cog):
         prize: str,
         channel: disnake.TextChannel,
         winner_count: int,
-        end_date: str = None,
+        end_date=pendulum.now(tz="UTC").add(hours=1),
         title: str = "🎉 New giveaway 🎉",
         description: str = "Click on the button below to participate!",
     ):
         await inter.response.defer(ephemeral=True)
 
-        if end_date is None:
-            end_date = pendulum.now().add(hours=1)
-        else:
-            try:
-                end_date = pendulum.parse(end_date, tz="UTC", strict=False)
-            except ParserError:
-                return await inter.followup.send(
-                    f"I couldn't parse `{end_date}` into a valid date! Please try again.",
-                    ephemeral=True,
-                )
+        try:
+            end_date = pendulum.parse(end_date, tz="UTC")
+        except ParserError:
+            return await inter.followup.send(
+                f"I couldn't parse `{end_date}` into a valid date! Please try again.",
+                ephemeral=True,
+            )
 
         if end_date < pendulum.now():
             return await inter.followup.send(
@@ -271,7 +273,9 @@ class GiveawayCommand(commands.Cog):
                 ephemeral=True,
             )
 
-        if giveaway["end_date"] < pendulum.now():
+        end_date = pendulum.instance(giveaway["end_date"], tz="UTC")
+
+        if end_date < pendulum.now():
             return await inter.followup.send(
                 "This giveaway has already ended", ephemeral=True
             )
@@ -416,7 +420,9 @@ class GiveawayCommand(commands.Cog):
                 ephemeral=True,
             )
 
-        if giveaway["end_date"] > pendulum.now():
+        end_date = pendulum.instance(giveaway["end_date"], tz="UTC")
+
+        if end_date > pendulum.now():
             return await inter.followup.send(
                 "This giveaway hasn't ended yet!", ephemeral=True
             )
