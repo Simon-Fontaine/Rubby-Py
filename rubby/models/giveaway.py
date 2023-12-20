@@ -20,5 +20,5 @@ class Giveaway(BaseModel):
 
     winner_count: int = Field(..., ge=1)
     ended: bool = Field(default=False)
-    end_date: datetime = Field(..., gt=datetime.utcnow())
-    created_at: datetime = Field(default=datetime.utcnow())
+    end_date: datetime
+    created_at: datetime

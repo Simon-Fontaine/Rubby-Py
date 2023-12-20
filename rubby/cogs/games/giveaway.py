@@ -1,17 +1,20 @@
 import logging
 import random
-import datetime
+import dateparser
+import pendulum
+import pytz
 
 import disnake
 from disnake.ext import tasks, commands
 
-import pendulum
-from pendulum.exceptions import ParserError
+from datetime import datetime
 
 from pydantic import ValidationError
 
 from rubby.database import get_database
 from rubby.models import Giveaway
+
+default_timezone = pytz.timezone("UTC")
 
 
 def get_giveaway_buttons(
@@ -34,32 +37,33 @@ def get_giveaway_buttons(
     ]
 
 
-def format_time(time: pendulum.DateTime):
+def format_time(time: datetime):
+    time = pendulum.instance(time)
+
     return time.format("MMMM Do YYYY [at] H:mm zz")
 
 
 class GiveawayCommand(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.giveaway_loop.start()
+        self.giveaway_expiration_loop.start()
 
     def cog_unload(self):
-        self.giveaway_loop.cancel()
+        self.giveaway_expiration_loop.cancel()
 
     @tasks.loop(seconds=15.0)
-    async def giveaway_loop(self):
+    async def giveaway_expiration_loop(self):
+        current_time = datetime.now(default_timezone)
         database = await get_database()
         cursor = database.giveaways.find(
-            {"end_date": {"$lte": datetime.datetime.utcnow()}, "ended": False}
+            {
+                "end_date": {"$lt": current_time},
+                "ended": False,
+            }
         )
         giveaway_list = await cursor.to_list(length=None)
 
         for giveaway in giveaway_list:
-            end_date = pendulum.instance(giveaway["end_date"], tz="UTC")
-
-            if end_date < pendulum.now():
-                continue
-
             try:
                 channel = self.bot.get_channel(giveaway["channel_id"])
                 message = await channel.fetch_message(giveaway["_id"])
@@ -74,7 +78,6 @@ class GiveawayCommand(commands.Cog):
             winners = None
             winners_mentions = None
             description = "There were not enough participants to draw winners."
-            end_date = pendulum.now()
 
             if len(giveaway["participants"]) > 0:
                 if len(giveaway["participants"]) < giveaway["winner_count"]:
@@ -99,7 +102,7 @@ class GiveawayCommand(commands.Cog):
 
             buttons = get_giveaway_buttons(
                 first_label=f"Participate ({len(giveaway['participants'])})",
-                second_label="Ended on " + format_time(end_date),
+                second_label="Ended on " + format_time(current_time),
                 disabled=True,
             )
 
@@ -112,7 +115,7 @@ class GiveawayCommand(commands.Cog):
                     "$set": {
                         "result_message_id": result_message.id,
                         "ended": True,
-                        "end_date": end_date,
+                        "end_date": current_time,
                     }
                 },
             )
@@ -121,8 +124,8 @@ class GiveawayCommand(commands.Cog):
                 giveaway["prize"],
             )
 
-    @giveaway_loop.before_loop
-    async def before_printer(self):
+    @giveaway_expiration_loop.before_loop
+    async def before_giveaway_expiration_loop(self):
         await self.bot.wait_until_ready()
 
     @commands.Cog.listener("on_button_click")
@@ -134,13 +137,14 @@ class GiveawayCommand(commands.Cog):
 
         database = await get_database()
         giveaway = await database.giveaways.find_one({"_id": inter.message.id})
+        current_time = datetime.now(default_timezone)
 
         if giveaway is None:
             inter.message.embeds[0].title += " [NOT FOUND]"
             inter.message.embeds[0].color = disnake.Color.orange()
 
             buttons = get_giveaway_buttons(
-                second_label="Errored on " + format_time(pendulum.now()),
+                second_label="Errored on " + format_time(current_time),
                 disabled=True,
             )
 
@@ -150,9 +154,9 @@ class GiveawayCommand(commands.Cog):
                 ephemeral=True,
             )
 
-        end_date = pendulum.instance(giveaway["end_date"], tz="UTC")
+        end_date = default_timezone.localize(giveaway["end_date"])
 
-        if end_date < pendulum.now():
+        if end_date < current_time:
             return await inter.followup.send(
                 "This giveaway doesn't accept participants anymore!", ephemeral=True
             )
@@ -186,21 +190,27 @@ class GiveawayCommand(commands.Cog):
         prize: str,
         channel: disnake.TextChannel,
         winner_count: int,
-        end_date=pendulum.now(tz="UTC").add(hours=1),
+        end_date: str = None,
         title: str = "🎉 New giveaway 🎉",
         description: str = "Click on the button below to participate!",
     ):
         await inter.response.defer(ephemeral=True)
 
-        try:
-            end_date = pendulum.parse(end_date, tz="UTC")
-        except ParserError:
+        if end_date is None:
+            end_date = datetime.now(default_timezone) + pendulum.Duration(hours=1)
+        else:
+            end_date = dateparser.parse(end_date, settings={"TIMEZONE": "UTC"})
+
+        if end_date is None:
             return await inter.followup.send(
                 f"I couldn't parse `{end_date}` into a valid date! Please try again.",
                 ephemeral=True,
             )
 
-        if end_date < pendulum.now():
+        end_date = default_timezone.localize(end_date)
+        current_time = datetime.now(default_timezone)
+
+        if end_date < current_time:
             return await inter.followup.send(
                 "End date cannot be in the past!",
                 ephemeral=True,
@@ -236,6 +246,7 @@ class GiveawayCommand(commands.Cog):
                 prize=prize,
                 winner_count=winner_count,
                 end_date=end_date,
+                created_at=current_time,
             )
 
             await database.giveaways.insert_one(giveaway.model_dump(by_alias=True))
@@ -273,9 +284,9 @@ class GiveawayCommand(commands.Cog):
                 ephemeral=True,
             )
 
-        end_date = pendulum.instance(giveaway["end_date"], tz="UTC")
+        end_date = default_timezone.localize(giveaway["end_date"])
 
-        if end_date < pendulum.now():
+        if end_date < datetime.now(default_timezone):
             return await inter.followup.send(
                 "This giveaway has already ended", ephemeral=True
             )
@@ -293,7 +304,7 @@ class GiveawayCommand(commands.Cog):
         winners = None
         winners_mentions = None
         description = "There were not enough participants to draw winners."
-        end_date = pendulum.now()
+        end_date = datetime.now(default_timezone)
 
         if len(giveaway["participants"]) > 0:
             if len(giveaway["participants"]) < giveaway["winner_count"]:
@@ -331,7 +342,7 @@ class GiveawayCommand(commands.Cog):
                 "$set": {
                     "result_message_id": result_message.id,
                     "ended": True,
-                    "end_date": pendulum.now(),
+                    "end_date": end_date,
                 }
             },
         )
@@ -420,9 +431,9 @@ class GiveawayCommand(commands.Cog):
                 ephemeral=True,
             )
 
-        end_date = pendulum.instance(giveaway["end_date"], tz="UTC")
+        end_date = default_timezone.localize(giveaway["end_date"])
 
-        if end_date > pendulum.now():
+        if end_date > datetime.now(default_timezone):
             return await inter.followup.send(
                 "This giveaway hasn't ended yet!", ephemeral=True
             )
