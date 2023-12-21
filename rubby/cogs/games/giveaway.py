@@ -139,6 +139,10 @@ class GiveawayCommand(commands.Cog):
         giveaway = await database.giveaways.find_one({"_id": inter.message.id})
         current_time = datetime.now(default_timezone)
 
+        embed = disnake.Embed(
+            color=disnake.Color.red(),
+        )
+
         if giveaway is None:
             inter.message.embeds[0].title += " [NOT FOUND]"
             inter.message.embeds[0].color = disnake.Color.orange()
@@ -149,24 +153,32 @@ class GiveawayCommand(commands.Cog):
             )
 
             await inter.message.edit(embed=inter.message.embeds[0], components=buttons)
+            embed.title = "I couldn't find a giveaway associated with this message ID!"
+
             return await inter.followup.send(
-                "I couldn't find a giveaway associated with that message ID! Please try again.",
+                embed=embed,
                 ephemeral=True,
             )
 
         end_date = default_timezone.localize(giveaway["end_date"])
-
         if end_date < current_time:
-            return await inter.followup.send(
-                "This giveaway doesn't accept participants anymore!", ephemeral=True
-            )
+            embed.title = "This giveaway doesn't accept participants anymore!"
+            embed.description = "Please wait for the results to be drawn."
+            return await inter.followup.send(embed=embed, ephemeral=True)
+
+        embed = disnake.Embed(
+            color=disnake.Color.blurple(),
+        )
+        embed.add_field(name="Prize", value=giveaway["prize"])
 
         if inter.user.id in giveaway["participants"]:
             giveaway["participants"].remove(inter.user.id)
-            await inter.followup.send("You left the giveaway!", ephemeral=True)
+            embed.title = "You're no longer participating in this giveaway!"
+            await inter.followup.send(embed=embed, ephemeral=True)
         else:
             giveaway["participants"].append(inter.user.id)
-            await inter.followup.send("You joined the giveaway!", ephemeral=True)
+            embed.title = "🎉 You're now participating in this giveaway!"
+            await inter.followup.send(embed=embed, ephemeral=True)
 
         buttons = get_giveaway_buttons(
             first_label=f"Participate ({len(giveaway['participants'])})",
@@ -183,21 +195,64 @@ class GiveawayCommand(commands.Cog):
     async def giveaway(self, inter: disnake.ApplicationCommandInteraction):
         pass
 
-    @giveaway.sub_command()
+    @giveaway.sub_command(
+        name="create",
+        description="Creates a new giveaway.",
+        options=[
+            disnake.Option(
+                type=disnake.OptionType.string,
+                name="prize",
+                description="The prize of the giveaway.",
+                required=True,
+            ),
+            disnake.Option(
+                type=disnake.OptionType.channel,
+                channel_types=[disnake.ChannelType.text],
+                name="channel",
+                description="The channel to create the giveaway in.",
+                required=True,
+            ),
+            disnake.Option(
+                type=disnake.OptionType.integer,
+                name="winner_count",
+                description="The number of winners of the giveaway.",
+                min_value=1,
+                required=True,
+            ),
+            disnake.Option(
+                type=disnake.OptionType.string,
+                name="end_date",
+                description="The end date of the giveaway.",
+                required=False,
+            ),
+            disnake.Option(
+                type=disnake.OptionType.string,
+                name="title",
+                description="The title of the giveaway.",
+                required=False,
+            ),
+            disnake.Option(
+                type=disnake.OptionType.string,
+                name="description",
+                description="The description of the giveaway.",
+                required=False,
+            ),
+        ],
+    )
     async def create(
         self,
         inter: disnake.ApplicationCommandInteraction,
         prize: str,
         channel: disnake.TextChannel,
         winner_count: int,
-        end_date: str = None,
+        end_date: str,
         title: str = "🎉 New giveaway 🎉",
         description: str = "Click on the button below to participate!",
     ):
         await inter.response.defer(ephemeral=True)
 
         if end_date is None:
-            end_date = datetime.now(default_timezone) + pendulum.Duration(hours=1)
+            end_date = datetime.now() + pendulum.Duration(hours=1)
         else:
             end_date = dateparser.parse(end_date, settings={"TIMEZONE": "UTC"})
 
@@ -263,7 +318,18 @@ class GiveawayCommand(commands.Cog):
             )
             return await message.delete()
 
-    @giveaway.sub_command()
+    @giveaway.sub_command(
+        name="end",
+        description="Ends a giveaway.",
+        options=[
+            disnake.Option(
+                type=disnake.OptionType.string,
+                name="message_id",
+                description="The message ID of the giveaway.",
+                required=True,
+            )
+        ],
+    )
     async def end(self, inter: disnake.ApplicationCommandInteraction, message_id: str):
         await inter.response.defer(ephemeral=True)
 
@@ -352,7 +418,18 @@ class GiveawayCommand(commands.Cog):
             ephemeral=True,
         )
 
-    @giveaway.sub_command()
+    @giveaway.sub_command(
+        name="delete",
+        description="Deletes a giveaway.",
+        options=[
+            disnake.Option(
+                type=disnake.OptionType.string,
+                name="message_id",
+                description="The message ID of the giveaway.",
+                required=True,
+            )
+        ],
+    )
     async def delete(
         self, inter: disnake.ApplicationCommandInteraction, message_id: str
     ):
@@ -403,7 +480,18 @@ class GiveawayCommand(commands.Cog):
             ephemeral=True,
         )
 
-    @giveaway.sub_command()
+    @giveaway.sub_command(
+        name="reroll",
+        description="Rerolls a giveaway.",
+        options=[
+            disnake.Option(
+                type=disnake.OptionType.string,
+                name="message_id",
+                description="The message ID of the giveaway.",
+                required=True,
+            )
+        ],
+    )
     async def reroll(
         self, inter: disnake.ApplicationCommandInteraction, message_id: str
     ):

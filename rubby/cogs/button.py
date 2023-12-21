@@ -6,10 +6,14 @@ class ButtonCommand(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.slash_command()
+    @commands.slash_command(
+        name="buttons",
+        description="Sends a message with buttons.",
+    )
     async def buttons(self, inter: disnake.ApplicationCommandInteraction):
         await inter.response.send_message(
             "This is a button!",
+            ephemeral=True,
             components=[
                 disnake.ui.Button(
                     label="Yes", style=disnake.ButtonStyle.success, custom_id="yes"
@@ -26,9 +30,9 @@ class ButtonCommand(commands.Cog):
             return
 
         if inter.component.custom_id == "yes":
-            await inter.response.send_message("You clicked yes!")
+            await inter.response.send_message("You clicked yes!", ephemeral=True)
         elif inter.component.custom_id == "no":
-            await inter.response.send_message("You clicked no!")
+            await inter.response.send_message("You clicked no!", ephemeral=True)
 
 
 def setup(bot: commands.Bot):
