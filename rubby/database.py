@@ -22,11 +22,11 @@ class DatabaseManager:
             cls._instance = cls.__new__(cls)
             cls._instance.client = AsyncIOMotorClient(Env.MONGO_URI)
             cls._instance.initialized = True
-            logging.info(
+            logging.debug(
                 "DatabaseManager initialized successfully. Using new instance."
             )
         else:
-            logging.info(
+            logging.debug(
                 "DatabaseManager already initialized. Using existing instance."
             )
 
@@ -41,8 +41,8 @@ class DatabaseManager:
 
 async def get_database(database_name: Optional[str] = "rubby"):
     if not DatabaseManager.instance().initialized:
-        logging.info("Initializing DatabaseManager for database access.")
+        logging.debug("Initializing DatabaseManager for database access.")
         await DatabaseManager.initialize()
     else:
-        logging.info("Using existing DatabaseManager instance for database access.")
+        logging.debug("Using existing DatabaseManager instance for database access.")
     return DatabaseManager.instance().client[database_name]
