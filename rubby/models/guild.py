@@ -11,3 +11,4 @@ class Guild(BaseModel):
         default=f"https://cdn.discordapp.com/embed/avatars/{random.randint(0, 4)}.png",
     )
     created_at: datetime = Field(...)
+    timezone: str = Field(default="UTC")

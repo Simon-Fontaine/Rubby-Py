@@ -1,9 +1,11 @@
-from datetime import datetime
+import pendulum
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Giveaway(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     message_id: int = Field(..., alias="_id")
     result_message_id: Optional[int] = None
 
@@ -11,7 +13,8 @@ class Giveaway(BaseModel):
     guild_id: int = Field(...)
 
     created_by: int = Field(...)
-    participants: list[int] = Field(default=[])
+    participants: Optional[list[int]] = Field(default=[])
+    finished_configuring: Optional[bool] = Field(default=False)
 
     # Settings
     title: str = Field(...)
@@ -19,6 +22,8 @@ class Giveaway(BaseModel):
     prize: str = Field(...)
 
     winner_count: int = Field(..., ge=1)
-    ended: bool = Field(default=False)
-    end_date: datetime
-    created_at: datetime
+    allowed_roles: Optional[list[int]] = Field(default=[])
+
+    ended: Optional[bool] = Field(default=False)
+    end_date: pendulum.DateTime
+    created_at: pendulum.DateTime

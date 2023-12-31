@@ -24,3 +24,8 @@ class Emojis(ABC):
         "staff": "<:staff:1182688761033793627>",
         "verified_bot_developer": "<:verified_bot_developer:1182688731040317520>",
     }
+
+    SYMBOLS: Final[object] = {
+        "exclamation_mark_red": "<:exclamation_mark_red:1191025410071343234>",
+        "check_mark_green": "<:check_mark_green:1191025408523632660>",
+    }

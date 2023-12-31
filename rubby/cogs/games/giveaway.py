@@ -1,195 +1,30 @@
-import logging
 import random
-import dateparser
 import pendulum
-import pytz
 
 import disnake
-from disnake.ext import tasks, commands
-
-from datetime import datetime
-
-from pydantic import ValidationError
+from disnake.ext import commands
 
 from rubby.database import get_database
-from rubby.models import Giveaway
 
-default_timezone = pytz.timezone("UTC")
-
-
-def get_giveaway_buttons(
-    second_label: str, first_label: str = "Participate", disabled: bool = False
-):
-    return [
-        disnake.ui.Button(
-            label=first_label,
-            style=disnake.ButtonStyle.primary,
-            emoji="🎉",
-            custom_id="join_giveaway",
-            disabled=disabled,
-        ),
-        disnake.ui.Button(
-            label=second_label,
-            style=disnake.ButtonStyle.secondary,
-            custom_id="disabled_button",
-            disabled=True,
-        ),
-    ]
+from rubby.misc.emojis import Emojis
+from rubby.functions.time_object import create_time_object
+from rubby.functions.giveaways.create_giveaway_buttons import create_giveaway_buttons
 
 
-def format_time(time: datetime):
-    time = pendulum.instance(time)
+error_embed = disnake.Embed(
+    color=disnake.Color.red(),
+    title=f"{Emojis.SYMBOLS['exclamation_mark_red']} Error!",
+)
 
-    return time.format("MMMM Do YYYY [at] H:mm zz")
+success_embed = disnake.Embed(
+    color=disnake.Color.green(),
+    title=f"{Emojis.SYMBOLS['check_mark_green']} Success!",
+)
 
 
 class GiveawayCommand(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.giveaway_expiration_loop.start()
-
-    def cog_unload(self):
-        self.giveaway_expiration_loop.cancel()
-
-    @tasks.loop(seconds=15.0)
-    async def giveaway_expiration_loop(self):
-        current_time = datetime.now(default_timezone)
-        database = await get_database()
-        cursor = database.giveaways.find(
-            {
-                "end_date": {"$lt": current_time},
-                "ended": False,
-            }
-        )
-        giveaway_list = await cursor.to_list(length=None)
-
-        for giveaway in giveaway_list:
-            try:
-                channel = self.bot.get_channel(giveaway["channel_id"])
-                message = await channel.fetch_message(giveaway["_id"])
-            except disnake.NotFound:
-                await database.giveaways.delete_one({"_id": giveaway["_id"]})
-                logging.info(
-                    'Deleted giveaway for "%s" because the message was not found!',
-                    giveaway["prize"],
-                )
-                continue
-
-            winners = None
-            winners_mentions = None
-            description = "There were not enough participants to draw winners."
-
-            if len(giveaway["participants"]) > 0:
-                if len(giveaway["participants"]) < giveaway["winner_count"]:
-                    winners = giveaway["participants"]
-                else:
-                    winners = random.sample(
-                        giveaway["participants"], giveaway["winner_count"]
-                    )
-                winners_mentions = " ".join([f"<@{winner}>" for winner in winners])
-                description = f"The winner of this giveaway {'are' if len(winners) > 1 else 'is'} tagged above! Congratulations 🎉"
-
-            embed = disnake.Embed(
-                title=f"{giveaway['title']} [RESULTS]",
-                description=description,
-                color=disnake.Color.blurple(),
-            )
-            embed.add_field(name="Prize", value=giveaway["prize"])
-            embed.set_footer(text=f"Participants: {len(giveaway['participants'])}")
-
-            message.embeds[0].title = f"{giveaway['title']} [ENDED]"
-            message.embeds[0].color = disnake.Color.red()
-
-            buttons = get_giveaway_buttons(
-                first_label=f"Participate ({len(giveaway['participants'])})",
-                second_label="Ended on " + format_time(current_time),
-                disabled=True,
-            )
-
-            await message.edit(embed=message.embeds[0], components=buttons)
-            result_message = await message.reply(embed=embed, content=winners_mentions)
-
-            await database.giveaways.update_one(
-                {"_id": giveaway["_id"]},
-                {
-                    "$set": {
-                        "result_message_id": result_message.id,
-                        "ended": True,
-                        "end_date": current_time,
-                    }
-                },
-            )
-            logging.info(
-                'Ended giveaway for "%s" because the end date has passed!',
-                giveaway["prize"],
-            )
-
-    @giveaway_expiration_loop.before_loop
-    async def before_giveaway_expiration_loop(self):
-        await self.bot.wait_until_ready()
-
-    @commands.Cog.listener("on_button_click")
-    async def help_listener(self, inter: disnake.MessageInteraction):
-        if inter.component.custom_id != "join_giveaway":
-            return
-
-        await inter.response.defer(ephemeral=True)
-
-        database = await get_database()
-        giveaway = await database.giveaways.find_one({"_id": inter.message.id})
-        current_time = datetime.now(default_timezone)
-
-        embed = disnake.Embed(
-            color=disnake.Color.red(),
-        )
-
-        if giveaway is None:
-            inter.message.embeds[0].title += " [NOT FOUND]"
-            inter.message.embeds[0].color = disnake.Color.orange()
-
-            buttons = get_giveaway_buttons(
-                second_label="Errored on " + format_time(current_time),
-                disabled=True,
-            )
-
-            await inter.message.edit(embed=inter.message.embeds[0], components=buttons)
-            embed.title = "I couldn't find a giveaway associated with this message ID!"
-
-            return await inter.followup.send(
-                embed=embed,
-                ephemeral=True,
-            )
-
-        end_date = default_timezone.localize(giveaway["end_date"])
-        if end_date < current_time:
-            embed.title = "This giveaway doesn't accept participants anymore!"
-            embed.description = "Please wait for the results to be drawn."
-            return await inter.followup.send(embed=embed, ephemeral=True)
-
-        embed = disnake.Embed(
-            color=disnake.Color.blurple(),
-        )
-        embed.add_field(name="Prize", value=giveaway["prize"])
-
-        if inter.user.id in giveaway["participants"]:
-            giveaway["participants"].remove(inter.user.id)
-            embed.title = "You're no longer participating in this giveaway!"
-            await inter.followup.send(embed=embed, ephemeral=True)
-        else:
-            giveaway["participants"].append(inter.user.id)
-            embed.title = "🎉 You're now participating in this giveaway!"
-            await inter.followup.send(embed=embed, ephemeral=True)
-
-        buttons = get_giveaway_buttons(
-            first_label=f"Participate ({len(giveaway['participants'])})",
-            second_label="Ends on " + format_time(end_date),
-        )
-
-        await database.giveaways.update_one(
-            {"_id": inter.message.id},
-            {"$set": {"participants": giveaway["participants"]}},
-        )
-        await inter.message.edit(components=buttons)
 
     @commands.slash_command()
     async def giveaway(self, inter: disnake.ApplicationCommandInteraction):
@@ -198,273 +33,189 @@ class GiveawayCommand(commands.Cog):
     @giveaway.sub_command(
         name="create",
         description="Creates a new giveaway.",
-        options=[
-            disnake.Option(
-                type=disnake.OptionType.string,
-                name="prize",
-                description="The prize of the giveaway.",
-                required=True,
-            ),
-            disnake.Option(
-                type=disnake.OptionType.channel,
-                channel_types=[disnake.ChannelType.text],
-                name="channel",
-                description="The channel to create the giveaway in.",
-                required=True,
-            ),
-            disnake.Option(
-                type=disnake.OptionType.integer,
-                name="winner_count",
-                description="The number of winners of the giveaway.",
-                min_value=1,
-                required=True,
-            ),
-            disnake.Option(
-                type=disnake.OptionType.string,
-                name="end_date",
-                description="The end date of the giveaway.",
-                required=False,
-            ),
-            disnake.Option(
-                type=disnake.OptionType.string,
-                name="title",
-                description="The title of the giveaway.",
-                required=False,
-            ),
-            disnake.Option(
-                type=disnake.OptionType.string,
-                name="description",
-                description="The description of the giveaway.",
-                required=False,
-            ),
-        ],
     )
     async def create(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        prize: str,
-        channel: disnake.TextChannel,
-        winner_count: int,
-        end_date: str,
-        title: str = "🎉 New giveaway 🎉",
-        description: str = "Click on the button below to participate!",
     ):
-        await inter.response.defer(ephemeral=True)
+        time = await create_time_object(inter.guild.id, pendulum.now().add(hours=1))
 
-        if end_date is None:
-            end_date = datetime.now() + pendulum.Duration(hours=1)
-        else:
-            end_date = dateparser.parse(end_date, settings={"TIMEZONE": "UTC"})
-
-        if end_date is None:
-            return await inter.followup.send(
-                f"I couldn't parse `{end_date}` into a valid date! Please try again.",
-                ephemeral=True,
-            )
-
-        end_date = default_timezone.localize(end_date)
-        current_time = datetime.now(default_timezone)
-
-        if end_date < current_time:
-            return await inter.followup.send(
-                "End date cannot be in the past!",
-                ephemeral=True,
-            )
-
-        embed = disnake.Embed(
-            title=title,
-            description=description,
-            color=disnake.Color.blurple(),
+        await inter.response.send_modal(
+            title="Create a new giveaway",
+            custom_id="create_giveaway",
+            components=[
+                disnake.ui.TextInput(
+                    label="End date (Required)",
+                    custom_id="duration",
+                    style=disnake.TextInputStyle.short,
+                    placeholder=f"e.g. {time.small_date_format}",
+                    value=time.small_date_format,
+                    required=True,
+                ),
+                disnake.ui.TextInput(
+                    label="Name of the prize (Required)",
+                    custom_id="prize",
+                    style=disnake.TextInputStyle.short,
+                    placeholder="e.g. Discord Nitro",
+                    required=True,
+                    max_length=1000,
+                ),
+                disnake.ui.TextInput(
+                    label="Title text (Required)",
+                    custom_id="title",
+                    style=disnake.TextInputStyle.short,
+                    placeholder="e.g. 🎉 New giveaway 🎉",
+                    value="🎉 New giveaway 🎉",
+                    required=True,
+                    max_length=256,
+                ),
+                disnake.ui.TextInput(
+                    label="Description text (Optional)",
+                    custom_id="description",
+                    style=disnake.TextInputStyle.long,
+                    placeholder="e.g. Click on the button below to participate!",
+                    value="Click on the button below to participate!",
+                    required=False,
+                    max_length=2000,
+                ),
+            ],
         )
-
-        embed.set_footer(text=f"Max Winners: {winner_count} | Hosted By: {inter.user}")
-
-        buttons = get_giveaway_buttons(
-            second_label="Ends on " + format_time(end_date),
-        )
-
-        message = await channel.send(
-            embed=embed,
-            components=buttons,
-        )
-
-        database = await get_database()
-
-        try:
-            giveaway = Giveaway(
-                _id=message.id,
-                channel_id=channel.id,
-                guild_id=inter.guild.id,
-                created_by=inter.user.id,
-                title=title,
-                description=description,
-                prize=prize,
-                winner_count=winner_count,
-                end_date=end_date,
-                created_at=current_time,
-            )
-
-            await database.giveaways.insert_one(giveaway.model_dump(by_alias=True))
-
-            return await inter.followup.send(
-                f'Successfully created giveaway for "{prize}"!',
-                ephemeral=True,
-            )
-        except ValidationError as e:
-            errors = "\n".join([error["msg"] for error in e.errors()])
-            await inter.followup.send(
-                f'Failed to create giveaway for "{prize}"! Error: {errors}',
-                ephemeral=True,
-            )
-            return await message.delete()
 
     @giveaway.sub_command(
         name="end",
         description="Ends a giveaway.",
-        options=[
-            disnake.Option(
-                type=disnake.OptionType.string,
-                name="message_id",
-                description="The message ID of the giveaway.",
-                required=True,
-            )
-        ],
     )
-    async def end(self, inter: disnake.ApplicationCommandInteraction, message_id: str):
+    async def end(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        message_id: str = commands.Param(
+            name="message_id",
+            description="The message ID of the giveaway.",
+        ),
+    ):
         await inter.response.defer(ephemeral=True)
 
         if not message_id.isdigit():
-            return await inter.followup.send(
-                "A message ID can only contain numbers! Please try again.",
-                ephemeral=True,
-            )
-
-        message_id = int(message_id)
+            error_embed.description = "Please provide a valid message ID."
+            return await inter.followup.send(embed=error_embed)
 
         database = await get_database()
-        giveaway = await database.giveaways.find_one({"_id": message_id})
+        giveaway = await database.giveaways.find_one(
+            {"_id": int(message_id), "guild_id": inter.guild.id}
+        )
 
-        if giveaway is None:
-            return await inter.followup.send(
-                "I couldn't find a giveaway associated with that message ID! Please try again.",
-                ephemeral=True,
-            )
+        if not giveaway:
+            error_embed.description = "I couldn't find a giveaway with that message ID."
+            return await inter.followup.send(embed=error_embed)
 
-        end_date = default_timezone.localize(giveaway["end_date"])
+        if giveaway["ended"]:
+            error_embed.description = "This giveaway has already ended."
+            return await inter.followup.send(embed=error_embed)
 
-        if end_date < datetime.now(default_timezone):
-            return await inter.followup.send(
-                "This giveaway has already ended", ephemeral=True
-            )
-
+        channel = self.bot.get_channel(giveaway["channel_id"])
         try:
-            channel = self.bot.get_channel(giveaway["channel_id"])
-            message = await channel.fetch_message(message_id)
+            message = await channel.fetch_message(giveaway["_id"])
         except disnake.NotFound:
-            await database.giveaways.delete_one({"_id": message_id})
-            await inter.followup.send(
-                "I couldn't find a giveaway associated with that message ID! Please try again.",
-                ephemeral=True,
-            )
+            message = None
 
-        winners = None
+        if not message:
+            error_embed.description = "I couldn't find the giveaway message."
+            await database.giveaways.delete_one({"_id": int(message_id)})
+            return await inter.followup.send(embed=error_embed)
+
+        end_date = await create_time_object(inter.guild.id)
+        buttons = await create_giveaway_buttons(
+            len(giveaway["participants"]), end_date, True
+        )
+        winners = []
         winners_mentions = None
         description = "There were not enough participants to draw winners."
-        end_date = datetime.now(default_timezone)
 
         if len(giveaway["participants"]) > 0:
-            if len(giveaway["participants"]) < giveaway["winner_count"]:
+            if len(giveaway["participants"]) <= giveaway["winner_count"]:
                 winners = giveaway["participants"]
             else:
                 winners = random.sample(
                     giveaway["participants"], giveaway["winner_count"]
                 )
-            winners_mentions = " ".join([f"<@{winner}>" for winner in winners])
+
+            winners_mentions = ", ".join([f"<@{winner}>" for winner in winners])
             description = f"The winner of this giveaway {'are' if len(winners) > 1 else 'is'} tagged above! Congratulations 🎉"
 
-        embed = disnake.Embed(
-            title=f"{giveaway['title']} [RESULTS]",
+        result_embed = disnake.Embed(
+            title=f"{giveaway['title']} (Results)",
             description=description,
             color=disnake.Color.blurple(),
         )
-        embed.add_field(name="Prize", value=giveaway["prize"])
-        embed.set_footer(text=f"Participants: {len(giveaway['participants'])}")
-
-        message.embeds[0].title = f"{giveaway['title']} [ENDED]"
+        result_embed.add_field(
+            name="Prize",
+            value=giveaway["prize"],
+        )
+        message.embeds[0].title = f"{giveaway['title']} (Ended)"
         message.embeds[0].color = disnake.Color.red()
 
-        buttons = get_giveaway_buttons(
-            first_label=f"Participate ({len(giveaway['participants'])})",
-            second_label="Ended on " + format_time(end_date),
-            disabled=True,
+        await message.edit(content=None, embed=message.embeds[0], components=buttons)
+        result_message = await message.reply(
+            embed=result_embed, content=winners_mentions
         )
 
-        await message.edit(embed=message.embeds[0], components=buttons)
-        result_message = await message.reply(embed=embed, content=winners_mentions)
-
         await database.giveaways.update_one(
-            {"_id": message_id},
+            {"_id": giveaway["_id"]},
             {
                 "$set": {
                     "result_message_id": result_message.id,
                     "ended": True,
-                    "end_date": end_date,
+                    "end_date": end_date.date_time,
                 }
             },
         )
 
+        success_embed.description = f"Successfully ended the giveaway! \n\n**[Jump to results]({result_message.jump_url})**"
         await inter.followup.send(
-            f"Successfully ended giveaway for \"{giveaway['prize']}\"!",
+            embed=success_embed,
             ephemeral=True,
         )
 
     @giveaway.sub_command(
         name="delete",
         description="Deletes a giveaway.",
-        options=[
-            disnake.Option(
-                type=disnake.OptionType.string,
-                name="message_id",
-                description="The message ID of the giveaway.",
-                required=True,
-            )
-        ],
     )
     async def delete(
-        self, inter: disnake.ApplicationCommandInteraction, message_id: str
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        message_id: str = commands.Param(
+            name="message_id",
+            description="The message ID of the giveaway.",
+        ),
     ):
         await inter.response.defer(ephemeral=True)
 
         if not message_id.isdigit():
-            return await inter.followup.send(
-                "A message ID can only contain numbers! Please try again.",
-                ephemeral=True,
-            )
-
-        message_id = int(message_id)
+            error_embed.description = "Please provide a valid message ID."
+            return await inter.followup.send(embed=error_embed)
 
         database = await get_database()
-        giveaway = await database.giveaways.find_one({"_id": message_id})
+        giveaway = await database.giveaways.find_one(
+            {"_id": int(message_id), "guild_id": inter.guild.id}
+        )
 
-        if giveaway is None:
+        if not giveaway:
             giveaway = await database.giveaways.find_one(
-                {"result_message_id": message_id}
+                {"result_message_id": int(message_id), "guild_id": inter.guild.id}
             )
 
-        if giveaway is None:
-            return await inter.followup.send(
-                "I couldn't find a giveaway associated with that message ID! Please try again.",
-                ephemeral=True,
-            )
+        if not giveaway:
+            error_embed.description = "I couldn't find a giveaway with that message ID."
+            return await inter.followup.send(embed=error_embed)
 
+        channel = self.bot.get_channel(giveaway["channel_id"])
         try:
-            channel = self.bot.get_channel(giveaway["channel_id"])
-            message = await channel.fetch_message(message_id)
+            message = await channel.fetch_message(giveaway["_id"])
             await message.delete()
         except disnake.NotFound:
             pass
 
-        if channel is not None and giveaway["result_message_id"] is not None:
+        if giveaway["result_message_id"]:
             try:
                 result_message = await channel.fetch_message(
                     giveaway["result_message_id"]
@@ -473,104 +224,146 @@ class GiveawayCommand(commands.Cog):
             except disnake.NotFound:
                 pass
 
-        await database.giveaways.delete_one({"_id": message_id})
+        await database.giveaways.delete_one({"_id": giveaway["_id"]})
 
+        success_embed.description = "Successfully deleted the giveaway."
         await inter.followup.send(
-            f"Successfully deleted giveaway for \"{giveaway['prize']}\"!",
+            embed=success_embed,
             ephemeral=True,
         )
 
     @giveaway.sub_command(
         name="reroll",
         description="Rerolls a giveaway.",
-        options=[
-            disnake.Option(
-                type=disnake.OptionType.string,
-                name="message_id",
-                description="The message ID of the giveaway.",
-                required=True,
-            )
-        ],
     )
     async def reroll(
-        self, inter: disnake.ApplicationCommandInteraction, message_id: str
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        message_id: str = commands.Param(
+            name="message_id",
+            description="The message ID of the giveaway.",
+        ),
     ):
         await inter.response.defer(ephemeral=True)
 
         if not message_id.isdigit():
-            return await inter.followup.send(
-                "A message ID can only contain numbers! Please try again.",
-                ephemeral=True,
-            )
-
-        message_id = int(message_id)
+            error_embed.description = "Please provide a valid message ID."
+            return await inter.followup.send(embed=error_embed)
 
         database = await get_database()
-        giveaway = await database.giveaways.find_one({"_id": message_id})
-
-        if giveaway is None:
-            giveaway = await database.giveaways.find_one(
-                {"result_message_id": message_id}
-            )
-
-        if giveaway is None:
-            return await inter.followup.send(
-                "I couldn't find a giveaway associated with that message ID! Please try again.",
-                ephemeral=True,
-            )
-
-        end_date = default_timezone.localize(giveaway["end_date"])
-
-        if end_date > datetime.now(default_timezone):
-            return await inter.followup.send(
-                "This giveaway hasn't ended yet!", ephemeral=True
-            )
-
-        if giveaway["result_message_id"] is None:
-            return await inter.followup.send(
-                "This giveaway hasn't ended yet!", ephemeral=True
-            )
-
-        if len(giveaway["participants"]) == 0:
-            return await inter.followup.send(
-                "This giveaway doesn't have any participants!", ephemeral=True
-            )
-
-        try:
-            channel = self.bot.get_channel(giveaway["channel_id"])
-            result_message = await channel.fetch_message(giveaway["result_message_id"])
-        except disnake.NotFound:
-            return await inter.followup.send(
-                "I couldn't find a giveaway associated with that message ID! Please try again.",
-                ephemeral=True,
-            )
-
-        winners = None
-        winners_mentions = None
-
-        if len(giveaway["participants"]) < giveaway["winner_count"]:
-            winners = giveaway["participants"]
-        else:
-            winners = random.sample(giveaway["participants"], giveaway["winner_count"])
-        winners_mentions = " ".join([f"<@{winner}>" for winner in winners])
-
-        embed = disnake.Embed(
-            title=f"{giveaway['title']} [REROLLED]",
-            description="The winner of this giveaway has been rerolled! Congratulations 🎉",
-            color=disnake.Color.blurple(),
+        giveaway = await database.giveaways.find_one(
+            {"_id": int(message_id), "guild_id": inter.guild.id}
         )
 
-        embed.add_field(name="Prize", value=giveaway["prize"])
-        embed.set_footer(text=f"Participants: {len(giveaway['participants'])}")
+        if not giveaway:
+            giveaway = await database.giveaways.find_one(
+                {"result_message_id": int(message_id), "guild_id": inter.guild.id}
+            )
 
-        await result_message.edit(embed=embed, content=winners_mentions)
+        if not giveaway:
+            error_embed.description = "I couldn't find a giveaway with that message ID."
+            return await inter.followup.send(embed=error_embed)
+
+        if not giveaway["ended"]:
+            error_embed.description = "This giveaway hasn't ended yet."
+            return await inter.followup.send(embed=error_embed)
+
+        if len(giveaway["participants"]) <= giveaway["winner_count"]:
+            error_embed.description = (
+                "There were not enough participants to reroll winners."
+            )
+            return await inter.followup.send(embed=error_embed)
+
+        channel = self.bot.get_channel(giveaway["channel_id"])
+        try:
+            message = await channel.fetch_message(giveaway["_id"])
+        except disnake.NotFound:
+            message = None
+
+        if not message:
+            error_embed.description = "I couldn't find the giveaway message."
+            await database.giveaways.delete_one({"_id": int(message_id)})
+            return await inter.followup.send(embed=error_embed)
+
+        try:
+            result_message = await channel.fetch_message(giveaway["result_message_id"])
+        except disnake.NotFound:
+            result_message = None
+
+        winners = random.sample(giveaway["participants"], giveaway["winner_count"])
+        winners_mentions = ", ".join([f"<@{winner}>" for winner in winners])
+        description = f"The winner of this giveaway {'are' if len(winners) > 1 else 'is'} tagged above! Congratulations 🎉"
+
+        result_embed = disnake.Embed(
+            title=f"{giveaway['title']} (Rerolled)",
+            description=description,
+            color=disnake.Color.blurple(),
+        )
+        result_embed.add_field(
+            name="Prize",
+            value=giveaway["prize"],
+        )
+
+        if result_message:
+            await result_message.edit(
+                embed=result_embed,
+                content=winners_mentions,
+            )
+        else:
+            result_message = await message.reply(
+                embed=result_embed,
+                content=winners_mentions,
+            )
+
+        await database.giveaways.update_one(
+            {"_id": giveaway["_id"]},
+            {
+                "$set": {
+                    "result_message_id": result_message.id,
+                    "ended": True,
+                }
+            },
+        )
+
+        success_embed.description = f"Successfully rerolled the giveaway! \n\n**[Jump to results]({result_message.jump_url})**"
         await inter.followup.send(
-            f"Successfully rerolled giveaway for \"{giveaway['prize']}\"!",
+            embed=success_embed,
             ephemeral=True,
         )
 
-    @giveaway.sub_command()
-    async def list(self, inter: disnake.ApplicationCommandInteraction):
+    @giveaway.sub_command(
+        name="list",
+        description="Lists all giveaways.",
+    )
+    async def list(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        status: str = commands.Param(
+            name="status",
+            description="The status of the giveaway.",
+            choices=[
+                disnake.OptionChoice(name="All", value="all"),
+                disnake.OptionChoice(name="Active", value="active"),
+                disnake.OptionChoice(name="Ended", value="ended"),
+            ],
+            default=None,
+        ),
+        message_id: str = commands.Param(
+            name="message_id",
+            description="The message ID of the giveaway.",
+            default=None,
+        ),
+        channel_id: disnake.TextChannel = commands.Param(
+            name="channel_id",
+            description="The channel ID of the giveaway.",
+            default=None,
+        ),
+        created_by: disnake.User = commands.Param(
+            name="created_by",
+            description="The user ID of the giveaway creator.",
+            default=None,
+        ),
+    ):
         pass
 
 
